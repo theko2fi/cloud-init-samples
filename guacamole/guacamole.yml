@@ -1,16 +1,27 @@
+## template: jinja
 #cloud-config
+
+{% set default_user = "guacamole" %}
+{% set ssh_key = "ssh-rsa XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" %}
+{% set postgres_password = "gcZYye@7U89JF%" %}
+{% set postgres_user = "guacamole_db_user" %}
+{% set postgres_version = "13.4" %}
+{% set haproxy_version = "2.4" %}
+{% set dockercompose_version = "3.9" %}
+
 
 groups:
   - docker
 
 users:
   - default
-  - name: kenneth
+  - name: {{ default_user }}
     groups: sudo, docker
     shell: /bin/bash
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    homedir: /home/{{ default_user }}
     ssh_authorized_keys:
-      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDUFNIUkxH0dK3IfStk6vrE7e2fojWYkVbFAUYQ5XaxNRngbedKP3/PyoQu4z6T4bxZljnimeYNjurt9GvPNgRmaSrQi++0OefVi/CLMA/pUjeCwaVl0ivhlNVjXaLLmqLrQjzvzPs+qDuf0i4D0u2giHTE43QU8OE+nW6PVSGf/APldwptCV8JA/q/DgXge9vXVyEjWo3CXzhvSQceDKCAP4VeDJqrwbBxnaRsk9CVp2X/e83QgLeWiJrHGiUHZA/NhpEE6H12Dr5qAWTp9xHxJR+rhZijuaKNWmww47K5m5twaL+L1NhaTdQE3drQZmxnVBIKbn6JPGZi2n5TO+Pt kenneth@PC-G6-1
+      - {{ ssh_key }}  
 
 package_update: true
 package_upgrade: true
@@ -19,9 +30,9 @@ packages:
   - curl
 
 write_files:
-- path: /home/kenneth/guacamole/docker-compose.yml
+- path: /home/{{ default_user }}/guacamole/docker-compose.yml
   content: |
-    version: '3.9'
+    version: '{{ dockercompose_version }}'
     # networks
     # create a network 'guacamole_net' in mode 'bridged'
     networks:
@@ -49,7 +60,7 @@ write_files:
           POSTGRES_DB: guacamole_db
           POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
           POSTGRES_USER: '${POSTGRES_USER}'
-        image: postgres:13.4
+        image: postgres:{{ postgres_version }}
         networks:
           guacamole_net:
         restart: always
@@ -77,38 +88,47 @@ write_files:
           - haproxy_net
         restart: always
         volumes:
-        - ./opt/guacamole/bin/start.sh:/opt/guacamole/bin/start.sh
         - ./drive:/drive:rw
 
-- path: /home/kenneth/guacamole/.env
+- path: /home/{{ default_user }}/guacamole/.env
   content: |
-    POSTGRES_PASSWORD='Jh3TPJv7bCQbET'
-    POSTGRES_USER='guacamole_db_user'
+    POSTGRES_PASSWORD={{ postgres_password }}
+    POSTGRES_USER={{ postgres_user }}
 
-- path: /home/kenneth/haproxy/docker-compose.yml
+- path: /home/{{ default_user }}/haproxy/docker-compose.yml
   content: |
-    version: '3.9'
+    version: '{{ dockercompose_version }}'
     services:
       haproxy:
         container_name: haproxy
-        image: haproxytech/haproxy-alpine:2.4
+        image: haproxytech/haproxy-alpine:{{ haproxy_version }}
         ports:
           - 80:80
           - 443:443
           - 8404:8404
         volumes:
           - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+          - ./certs:/usr/local/etc/haproxy/certs/
         networks:
           - haproxy_net
         restart: always
         environment:
           ENDPOINT: '${ENDPOINT}'
+{% if not fqdn %}
+      reverse-proxy-https-helper:
+        image: alpine
+        command: sh -c "cd /etc/ssl/traefik
+          && wget traefik.me/cert.pem -O - >> traefik.me.pem
+          && wget traefik.me/privkey.pem -O - >> traefik.me.pem"
+        volumes:
+          - ./certs:/etc/ssl/traefik
+{% endif %}
     networks:
       haproxy_net:
         name: haproxy_net
         driver: bridge
 
-- path: /home/kenneth/haproxy/haproxy.cfg
+- path: /home/{{ default_user }}/haproxy/haproxy.cfg
   content: |
     global
       stats socket /var/run/api.sock user haproxy group haproxy mode 660 level admin expose-fd listeners
@@ -136,14 +156,14 @@ write_files:
     frontend myfrontend
       mode http
       bind :80
-      #bind :443 ssl crt /usr/local/etc/haproxy/certs/traefik.me.pem
-      #http-request redirect scheme https code 301 unless { ssl_fc }
+      bind :443 ssl crt /usr/local/etc/haproxy/certs/
+      http-request redirect scheme https code 301 if !{ ssl_fc }
       use_backend %[req.hdr(Host),lower]
 
     backend "${ENDPOINT}"
       server guacamole guacamole:8080 check inter 10s resolvers docker_resolver
 
-- path: /home/kenneth/ip.sh
+- path: /home/{{ default_user }}/ip.sh
   content: |
     #!/usr/bin/env sh
 
@@ -160,8 +180,9 @@ write_files:
     }
 
     publicIpFromMetadata() {
-      if cloud-init query vendor-data | grep DigitalOcean >/dev/null; then
-        PUBLIC_IP="$(curl -s http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address)"
+      if cloud-init query vendordata | grep DigitalOcean >/dev/null; then
+        #http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address
+        PUBLIC_IP="$(curl -s http://169.254.169.254/metadata/v1/reserved_ip/ipv4/ip_address)"
       elif test "$(cloud-init query platform)" = "azure"; then
         PUBLIC_IP="$(curl -H Metadata:true --noproxy '*' 'http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress/?api-version=2021-02-01&format=text')"
       fi
@@ -185,12 +206,15 @@ runcmd:
     sh get-docker.sh | grep -qE "ERROR: Unsupported distribution 'rocky'|ERROR: Unsupported distribution 'almalinux'" && sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin
   - 'systemctl start docker'
   - 'systemctl enable docker'
-  - 'mkdir -p /home/kenneth/guacamole/opt/guacamole/bin/'
-  - 'curl -fsSL https://raw.githubusercontent.com/apache/guacamole-client/master/guacamole-docker/bin/start.sh -o /home/kenneth/guacamole/opt/guacamole/bin/start.sh'
-  - 'chmod +x /home/kenneth/guacamole/opt/guacamole/bin/start.sh'
-  - 'mkdir /home/kenneth/guacamole/init >/dev/null 2>&1'
-  - 'chmod -R +x /home/kenneth/guacamole/init'
-  - 'docker run --rm guacamole/guacamole /opt/guacamole/bin/initdb.sh --postgres > /home/kenneth/guacamole/init/initdb.sql'
-  - 'PUBLIC_IP="$(/home/kenneth/ip.sh | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b")"; echo ENDPOINT="${PUBLIC_IP}.traefik.me" | tee /home/kenneth/haproxy/.env'
-  - 'chown -R kenneth:kenneth /home/kenneth/'
-  - 'docker compose -f /home/kenneth/haproxy/docker-compose.yml up -d && docker compose -f /home/kenneth/guacamole/docker-compose.yml up -d'
+  - 'mkdir -p /home/{{ default_user }}/guacamole/init >/dev/null 2>&1'
+  - 'chmod -R +x /home/{{ default_user }}/guacamole/init'
+  - 'docker run --rm guacamole/guacamole /opt/guacamole/bin/initdb.sh --postgres > /home/{{ default_user }}/guacamole/init/initdb.sql'
+  - 'mkdir -p /home/{{ default_user }}/haproxy/certs'
+{% if fqdn %}
+  - 'echo ENDPOINT={{ fqdn }} | tee /home/{{ default_user }}/haproxy/.env'
+  - bash -c 'openssl req -nodes -newkey rsa:2048 -new -x509 -keyout /dev/stdout -out /dev/stdout -subj "/CN={{ fqdn }}" > /home/{{ default_user }}/haproxy/certs/{{ fqdn }}.pem'
+{% else %}
+  - bash -c 'PUBLIC_IP="$(/home/{{ default_user }}/ip.sh | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b")"; PUBLIC_IP_FMT="${PUBLIC_IP//[.]/-}"; echo ENDPOINT="${PUBLIC_IP_FMT}.traefik.me" | tee /home/{{ default_user }}/haproxy/.env'
+{% endif %}
+  - 'chown -R {{ default_user }}:{{ default_user }} /home/{{ default_user }}/'
+  - 'docker compose -f /home/{{ default_user }}/haproxy/docker-compose.yml up -d && docker compose -f /home/{{ default_user }}/guacamole/docker-compose.yml up -d'
